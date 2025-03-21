@@ -4,8 +4,6 @@
 
 #include <nebula_common/util/string_conversions.hpp>
 
-#include <pthread.h>  // debug only
-
 #include <algorithm>
 #include <cstdio>
 #include <memory>
@@ -21,10 +19,6 @@ VelodyneRosWrapper::VelodyneRosWrapper(const rclcpp::NodeOptions & options)
 : rclcpp::Node("velodyne_ros_wrapper", rclcpp::NodeOptions(options).use_intra_process_comms(true)),
   wrapper_status_(Status::NOT_INITIALIZED),
   sensor_cfg_ptr_(nullptr),
-  packet_queue_(3000),
-  hw_interface_wrapper_(),
-  hw_monitor_wrapper_(),
-  decoder_wrapper_(),
   hw_reconfigure_timer_(this->create_wall_timer(
     std::chrono::seconds(1), std::bind(&VelodyneRosWrapper::reconfigure_hw_interface, this)))
 {
@@ -55,7 +49,7 @@ VelodyneRosWrapper::VelodyneRosWrapper(const rclcpp::NodeOptions & options)
     create_packet_subscriber();
   }
 
-  setup_decoder();
+  set_decoder_wrapper();
 
   // Register parameter callback after all params have been declared. Otherwise it would be called
   // once for each declaration
@@ -67,14 +61,14 @@ void VelodyneRosWrapper::reconfigure_hw_interface()
 {
   if (restart_hw_) {
     bringup_hw(use_udp_only_);
-    setup_decoder();
+    set_decoder_wrapper();
     restart_hw_ = false;
     hw_reconfigure_timer_->cancel();
   }
 
   if (restart_packet_subscriber_) {
     create_packet_subscriber();
-    setup_decoder();
+    set_decoder_wrapper();
     restart_packet_subscriber_ = false;
     hw_reconfigure_timer_->cancel();
   }
@@ -98,21 +92,6 @@ void VelodyneRosWrapper::set_decoder_wrapper()
   }
   decoder_wrapper_.emplace(
     this, hw_interface_wrapper_ ? hw_interface_wrapper_->hw_interface() : nullptr, sensor_cfg_ptr_);
-}
-
-void VelodyneRosWrapper::decoder_wrapper_thread(std::stop_token stoken)
-{
-  RCLCPP_DEBUG(get_logger(), "Starting stream");
-
-  while (!stoken.stop_requested()) {
-    auto [packet, valid] = packet_queue_.pop(std::chrono::milliseconds(100));
-    if (valid) {
-      decoder_wrapper_->process_cloud_packet(std::move(packet));
-    } else {
-      continue;
-    }
-  }
-  RCLCPP_INFO(get_logger(), "Gracefully stopped decoder thread");
 }
 
 void VelodyneRosWrapper::bringup_hw(bool use_udp_only)
@@ -218,7 +197,7 @@ void VelodyneRosWrapper::receive_scan_message_callback(
     nebula_pkt_ptr->stamp = pkt.stamp;
     std::copy(pkt.data.begin(), pkt.data.end(), std::back_inserter(nebula_pkt_ptr->data));
 
-    packet_queue_.push(std::move(nebula_pkt_ptr));
+    decoder_wrapper_->process_cloud_packet(std::move(nebula_pkt_ptr));
   }
 }
 
@@ -242,27 +221,12 @@ Status VelodyneRosWrapper::stream_start()
 
 void VelodyneRosWrapper::cleanup_on_hw_reconfigure()
 {
-  while (true) {
-    if (decoder_thread_.joinable()) {
-      stop_decoder_thread();
-      break;
-    }
-  }
-  decoder_thread_.join();
   if (hw_interface_wrapper_) {
     hw_interface_wrapper_.reset();
   }
   if (hw_monitor_wrapper_) {
     hw_monitor_wrapper_.reset();
   }
-}
-
-void VelodyneRosWrapper::setup_decoder()
-{
-  set_decoder_wrapper();
-  decoder_thread_ = std::jthread(&VelodyneRosWrapper::decoder_wrapper_thread, this);
-  // Set the thread name
-  pthread_setname_np(decoder_thread_.native_handle(), "VelDecThread");  // debug only
 }
 
 void VelodyneRosWrapper::reset_packet_subscriber()
@@ -361,9 +325,7 @@ void VelodyneRosWrapper::receive_cloud_packet_callback(std::vector<uint8_t> & pa
   msg_ptr->stamp.nanosec = static_cast<int>(timestamp_ns % 1'000'000'000);
   msg_ptr->data.swap(packet);
 
-  if (!packet_queue_.try_push(std::move(msg_ptr))) {
-    RCLCPP_ERROR_THROTTLE(get_logger(), *get_clock(), 500, "Packet(s) dropped");
-  }
+  decoder_wrapper_->process_cloud_packet(std::move(msg_ptr));
 }
 
 RCLCPP_COMPONENTS_REGISTER_NODE(VelodyneRosWrapper)

@@ -14,7 +14,6 @@
 
 #pragma once
 
-#include "nebula_ros/common/mt_queue.hpp"
 #include "nebula_ros/common/parameter_descriptors.hpp"
 #include "nebula_ros/velodyne/decoder_wrapper.hpp"
 #include "nebula_ros/velodyne/hw_interface_wrapper.hpp"
@@ -41,7 +40,6 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <thread>
 #include <vector>
 
 namespace nebula::ros
@@ -77,12 +75,7 @@ private:
   // HW interface management
   void bringup_hw(bool);
   void cleanup_on_hw_reconfigure();
-  void setup_decoder();
-
-  // Decoder thread management
-  void decoder_wrapper_thread(std::stop_token stoken);
   void set_decoder_wrapper();
-  void stop_decoder_thread() { decoder_thread_.request_stop(); }
 
   /// @brief rclcpp parameter callback
   /// @param parameters Received parameters
@@ -96,11 +89,6 @@ private:
   Status wrapper_status_;
 
   std::shared_ptr<const nebula::drivers::VelodyneSensorConfiguration> sensor_cfg_ptr_{};
-
-  /// @brief Stores received packets that have not been processed yet by the decoder thread
-  MtQueue<std::unique_ptr<nebula_msgs::msg::NebulaPacket>> packet_queue_;
-  /// @brief Thread to isolate decoding from receiving
-  std::jthread decoder_thread_;
 
   rclcpp::Subscription<velodyne_msgs::msg::VelodyneScan>::SharedPtr packets_sub_{};
 
